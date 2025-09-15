@@ -172,38 +172,77 @@ class GaussianDiffusion(nn.Module):
 
     @torch.no_grad()
     # x_in self.data['SR']
-    def p_sample_loop(self, x_in, continous=False):
+    def p_sample_loop(self, x_in, observed_mask,anomaly_scores,continous=False):
         device = self.betas.device
         q = 0
+        batch_size, channel, seq_len, feature_dim = x_in.shape
+        # 超参数设置
+        alpha = 1.0  # 公式4中的α参数
+        lambda_val = 0.1  # 公式9中的λ参数
+        N0 = 1.0  # 公式9中的N0参数
+        kappa = 0.5  # 公式5中的κ参数
 
-        sample_inter = (1 | (self.num_timesteps // 10))
-        if not self.conditional:
-            shape = x_in
-            img = torch.randn(shape, device=device)
-            ret_img = img
-            for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step',
-                          total=self.num_timesteps):
-                img = self.p_sample(img, i, clip_denoised=True)
-                if i % sample_inter == 0:
-                    ret_img = torch.cat([ret_img, img], dim=0)
-        else:
-            x = x_in
-            shape = x.shape
-            img = torch.randn(shape, device=device)
-            ret_img = x
+        # 计算观测点的自适应权重（公式4）
+        # anomaly_scores形状应为 (batch_size, seq_len) 或 (batch_size, channel, seq_len)
+        # 我们需要确保权重与x_in的形状匹配
+        if anomaly_scores.dim() == 2:  # (batch_size, seq_len)
+            # 扩展维度以匹配x_in
+            weights = torch.exp(-alpha * anomaly_scores).unsqueeze(1).unsqueeze(-1)
+            weights = weights.expand(-1, channel, -1, feature_dim)
+        else:  # 假设形状为 (batch_size, channel, seq_len)
+            weights = torch.exp(-alpha * anomaly_scores).unsqueeze(-1)
+            weights = weights.expand(-1, -1, -1, feature_dim)
 
-            for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step',
-                          total=self.num_timesteps):
-                img = self.p_sample(img, i, condition_x=x, clip_denoised=True)
-                if i % sample_inter == 0:
-                    ret_img = torch.cat([ret_img, img], dim=0)
+        # 创建观测点掩码（observed_mask中0表示观测点）
+        obs_mask = (observed_mask == 0).float()
+
+        # 应用权重到观测点
+        weighted_obs = x_in * obs_mask.unsqueeze(-1).expand_as(x_in) * weights
+
+        # 准备初始噪声（公式5）
+        shape = x_in.shape
+        noise = torch.randn(shape, device=device)
+
+        # 结合观测点和噪声（公式5）
+        x_t = kappa * weighted_obs + (1 - kappa) * noise
+        # 如果需要连续输出，初始化返回张量
         if continous:
-            return ret_img
+            ret_img = [x_t]
+        sample_inter = (1 | (self.num_timesteps // 10))
+
+        # 反向扩散过程
+        for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
+            # 使用加权的观测点作为条件进行采样
+            x_t_minus_1 = self.p_sample(
+                x_t, i,
+                condition_x=weighted_obs,  # 使用加权的观测点作为条件
+                clip_denoised=True
+            )
+
+            # 动态权重平滑（公式9和10）
+            h = N0 * torch.exp(torch.tensor(-lambda_val * i))  # 公式9
+
+            # 应用动态权重平滑（公式10）
+            # 注意：这里s是观测点掩码，1表示观测点，0表示非观测点
+            s = obs_mask.unsqueeze(-1).expand_as(x_t_minus_1)
+            x_t_minus_1 = (
+                    s * ((1 - weights * h) * x_t_minus_1 + weights * h * x_in) +
+                    (1 - s) * x_t_minus_1
+            )
+
+            x_t = x_t_minus_1
+
+            # 如果需要连续输出，保存当前步骤
+            if continous and i % sample_inter == 0:
+                ret_img.append(x_t)
+
+        if continous:
+            return torch.stack(ret_img)
         else:
-            return ret_img[-1]
+            return x_t
 
     @torch.no_grad()
-    def sample(self, batch_size=1, continous=False):
+    def sample(self, observed_mask,anomaly_scores,batch_size=1, continous=False):
         time_size = self.time_size
         channels = self.channels
         return self.p_sample_loop((batch_size, channels, time_size, time_size), continous)
@@ -211,10 +250,10 @@ class GaussianDiffusion(nn.Module):
     @torch.no_grad()
     # self.netG.module.super_resolution(
     #                     self.data['SR'], continous=continous, min_num=min_num, max_num=max_num)
-    def super_resolution(self, x_in,min_num, max_num, continous=False):
+    def super_resolution(self, x_in,observed_mask,anomaly_scores,min_num, max_num, continous=False):
         self.min_num = min_num
         self.max_num = max_num
-        return self.p_sample_loop(x_in, continous)
+        return self.p_sample_loop(x_in,observed_mask,anomaly_scores, continous)
 
     def q_sample(self, x_start, continuous_sqrt_alpha_cumprod, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start))

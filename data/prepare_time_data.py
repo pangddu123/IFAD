@@ -9,7 +9,7 @@ warnings.filterwarnings("ignore")
 
 
 class PrepareTimeData:
-    def __init__(self, data_path, phase, base, size,anomaly_scores=None,observation_ration=0.9):
+    def __init__(self, data_path, phase, base, size,anomaly_scores=None,observation_ration=0.99):
         self.data_path = data_path
         self.phase = phase
         self.base = base
@@ -40,7 +40,7 @@ class PrepareTimeData:
         df = self.df.copy()
         ori_values, values, labels, pre_labels = self.get_data_by_insert_normal()
 
-        return ori_values, values, labels, pre_labels
+        return ori_values, values, labels, pre_labels,self.anomaly_scores
 
     def get_mean_df(self, df):
         df = df.copy()
@@ -88,38 +88,15 @@ class PrepareTimeData:
             df['label'] = self.test_labels
         return df
 
-    # def fill_data(self, df):
-    #     df = df.copy()
-    #     data_end = math.ceil(self.row_num / self.size) * self.size
-    #
-    #     for i in range(self.row_num, data_end):
-    #         df = df.append(pd.Series(), ignore_index=True)
-    #
-    #     df.fillna(0, inplace=True)
-    #     return df
-
-    def fill_data(self, df, anomaly_scores):
+    def fill_data(self, df):
         df = df.copy()
         data_end = math.ceil(self.row_num / self.size) * self.size
 
-        # 填充 df
         for i in range(self.row_num, data_end):
             df = df.append(pd.Series(), ignore_index=True)
+
         df.fillna(0, inplace=True)
-
-        # 同步填充 anomaly_scores
-        if anomaly_scores is not None:
-            # 将 anomaly_scores 转换为 DataFrame 以便于填充
-            anomaly_scores_df = pd.DataFrame(anomaly_scores, columns=['anomaly_score'])
-            for i in range(self.row_num, data_end):
-                anomaly_scores_df = anomaly_scores_df.append(pd.Series([0], index=['anomaly_score']), ignore_index=True)
-            anomaly_scores_df.fillna(0, inplace=True)
-            anomaly_scores = anomaly_scores_df['anomaly_score'].values
-        else:
-            # 如果是训练阶段，anomaly_scores 为 None，则填充0数组
-            anomaly_scores = np.zeros(data_end)
-
-        return df, anomaly_scores
+        return df
 
     def read_dataset(self, data_path, data_name):
         if data_name.upper().find('MSL') != -1:
@@ -168,17 +145,21 @@ class PrepareTimeData:
         if self.anomaly_scores is None or len(self.anomaly_scores) == 0:
             # 如果没有异常得分，使用突变点检测
             df_pre_label = self.mutation_point(df)
+            self.anomaly_scores = [1e10 if pre_label == 1 else 0 for pre_label in df_pre_label['pre_label']]
+            insert_datas = self.insert_normal(df_pre_label)
+
         else:
             # 如果有异常得分，使用IFAD方法选择观测点
             df_pre_label = self.ifad_select_observation_points(df)
+            insert_datas = self.insert_normal_observation(df_pre_label)
 
 
-        insert_datas = self.insert_normal(df_pre_label)
 
         ori_values = []
         values = []
         labels = []
         pre_labels = []
+        anomaly_scores_list = []  # 新增：存储处理后的异常得分列表
 
         start_index = 0
         end_index = self.size
@@ -189,7 +170,10 @@ class PrepareTimeData:
             self.df[col] = insert_datas['value']
         self.df['pre_label'] = insert_datas['pre_label']
 
+        anomaly_scores_tensor = torch.tensor(self.anomaly_scores, dtype=torch.float32)
+
         ori_df = self.vertical_merge_df(self.ori_df)
+        ori_df = self.fill_data(ori_df)
         ori_df = self.fill_data(ori_df)
 
         for i in range(0, self.df.shape[0], self.size):
@@ -198,6 +182,9 @@ class PrepareTimeData:
 
             insert_data = pd.concat([insert_data, self.df[start_index: end_index]])
             ori_value = pd.concat([ori_value, ori_df[start_index: end_index]])
+
+            window_anomaly_scores = anomaly_scores_tensor[start_index: end_index]
+
             start_index += self.size
             end_index += self.size
 
@@ -210,11 +197,23 @@ class PrepareTimeData:
             pre_label = torch.tensor(np.array(pre_label).astype(np.int64))
             ori_value = torch.tensor(np.array(ori_value).astype(np.float32))
 
+            # ⭐ 关键修改：如果最后一次循环时长度不一致，就补齐
+            if i + self.size >= self.df.shape[0]:
+                if len(window_anomaly_scores) != ori_value.shape[0]:
+                    diff = ori_value.shape[0] - len(window_anomaly_scores)
+                    if diff > 0:  # 需要补长
+                        mean_val = window_anomaly_scores.float().mean()
+                        pad_vals = torch.full((diff,), mean_val, dtype=window_anomaly_scores.dtype)
+                        window_anomaly_scores = torch.cat([window_anomaly_scores, pad_vals], dim=0)
+
             values.append(value.unsqueeze(0))
             labels.append(label)
             pre_labels.append(pre_label)
             ori_values.append(ori_value.unsqueeze(0))
+            anomaly_scores_list.append(window_anomaly_scores.unsqueeze(0))  # 新增：将窗口得分添加到列表
 
+        # 将 anomaly_scores_list 赋值给 self.anomaly_scores 以便后续使用
+        self.anomaly_scores = anomaly_scores_list
         return ori_values, values, labels, pre_labels
 
     def ifad_select_observation_points(self, df):
@@ -232,6 +231,37 @@ class PrepareTimeData:
         df_pre_label.loc[observed_indices, 'pre_label'] = 0
         # df_pre_label = df_pre_label.drop(columns=['label'])
         return df_pre_label
+
+    def insert_normal_observation(self,df_pre_label):
+        """
+        当 pre_label == 1 时，将该行 value 替换为前2个点和后2个点的均值（不包含自身）。
+
+        参数
+        ----
+        df_pre_label : pd.DataFrame
+            必须包含 'value', 'label', 'pre_label' 三列
+
+        返回
+        ----
+        pd.DataFrame
+            替换后的 DataFrame
+        """
+        df = df_pre_label.copy()
+
+        # 前2个点 rolling
+        prev2 = df['value'].shift(1).rolling(window=2, min_periods=1).mean()
+        # 后2个点 rolling
+        next2 = df['value'][::-1].shift(1).rolling(window=2, min_periods=1).mean()[::-1]
+
+        # 计算邻居均值
+        neighbor_mean = (prev2 + next2) / 2
+
+        # 仅在 pre_label == 1 时替换
+        df.loc[df['pre_label'] == 1, 'value'] = neighbor_mean[df['pre_label'] == 1]
+        for i in range(self.row_num, df_pre_label.shape[0]):
+            df = df.append(pd.Series(), ignore_index=True)
+        df.fillna(0, inplace=True)
+        return df
 
     def standardize_data(self, df):
         df = df.copy()
@@ -320,6 +350,7 @@ class PrepareTimeData:
 
         df = pd.DataFrame(columns=['ind', 'value', 'label', 'pre_label'])
 
+
         for i in range(nor_count):
 
             if nor_end_indexes[i] - nor_start_indexes[i] + 1 < interval:
@@ -334,24 +365,6 @@ class PrepareTimeData:
                 temp_df['value'] = z
                 temp_df['pre_label'] = 0
                 df = pd.concat([df, temp_df])
-            # else:
-            #     last_start_x = -1
-            #     start_xs = range(nor_start_indexes[i], nor_end_indexes[i] + 1, interval)
-            #     xp = []
-            #     fp = []
-            #     for start_x in start_xs:
-            #         if start_x + interval > nor_end_indexes[i]:
-            #             last_start_x = start_x
-            #             break
-            #
-            #         xp.append(start_x)
-            #         xp.append(start_x + interval - 1)
-            #
-            #         fp.append(data['value'][start_x])
-            #         fp.append(data['value'][start_x + interval - 1])
-            #
-            #     x = range(nor_start_indexes[i], last_start_x)
-            #     z = np.interp(x, xp, fp)
             else:
                 last_start_x = -1
                 start_xs = range(nor_start_indexes[i], nor_end_indexes[i] + 1, interval)
@@ -368,15 +381,9 @@ class PrepareTimeData:
                     fp.append(data['value'][start_x])
                     fp.append(data['value'][start_x + interval - 1])
 
-                # 添加检查，确保 xp 不为空
-                if not xp:  # 如果 xp 为空，使用整个段的首尾点进行插值
-                    x = range(nor_start_indexes[i], nor_end_indexes[i] + 1)
-                    xp = [nor_start_indexes[i], nor_end_indexes[i]]
-                    fp = [data['value'][nor_start_indexes[i]], data['value'][nor_end_indexes[i]]]
-                    z = np.interp(x, xp, fp)
-                else:
-                    x = range(nor_start_indexes[i], last_start_x)
-                    z = np.interp(x, xp, fp)
+                x = range(nor_start_indexes[i], last_start_x)
+                z = np.interp(x, xp, fp)
+
                 temp_df = pd.DataFrame(columns=['ind', 'value', 'label', 'pre_label'])
                 temp_df['ind'] = x
                 temp_df['value'] = z
@@ -395,7 +402,6 @@ class PrepareTimeData:
                     temp_df['value'] = z
                     temp_df['pre_label'] = 0
                     df = pd.concat([df, temp_df])
-
         for i in range(ano_count):
             temp_df = pd.DataFrame(columns=['ind', 'value', 'label', 'pre_label'])
 
@@ -403,7 +409,6 @@ class PrepareTimeData:
             xp = [ano_start_indexes[i] - 1, ano_end_indexes[i] + 1]
             fp = [data['value'][ano_start_indexes[i] - 1], data['value'][ano_end_indexes[i] + 1]]
             z = np.interp(x, xp, fp)
-
             for j in range(len(x)):
                 if j == 0 or j == len(x) - 1:
                     continue
@@ -413,7 +418,6 @@ class PrepareTimeData:
                 temp_df.loc[x[j], 'pre_label'] = 1
 
             df = pd.concat([df, temp_df])
-
         df = df.set_index(['ind'], inplace=False).sort_index()
         df['label'] = data['label']
         for i in range(self.row_num, data.shape[0]):

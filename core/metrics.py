@@ -134,6 +134,86 @@ def relabeling_strategy(df, params):
 
     return best_f1
 
+import numpy as np
+from sklearn.metrics import f1_score, accuracy_score, precision_score, recall_score
+
+def relabeling_strategy_fast(df, params):
+    """
+    假设:
+      - df 包含真值列 'label'（0/1）
+      - relabel 的策略是选择排序后前 t 个为正例（top-N）
+      - thresholds 是整数 (top-N)，若不是请参考下方说明
+    """
+    thresholds = np.arange(params['start_label'], params['end_label'], params['step_label']).astype(int)
+    df_sort = df.sort_values(by="differ", ascending=False).reset_index(drop=True)
+    n = len(df_sort)
+    y_true = df_sort['label'].to_numpy().astype(np.uint8)
+
+    # 预计算连续为1的段（runs），并为每个位置标记它属于哪个 run（或 -1）
+    mask = (y_true == 1)
+    run_id = np.full(n, -1, dtype=int)
+    runs = []  # list of (start, end)
+    run_idx = 0
+    i = 0
+    while i < n:
+        if not mask[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and mask[j + 1]:
+            j += 1
+        runs.append((i, j))
+        run_id[i:j+1] = run_idx
+        run_idx += 1
+        i = j + 1
+
+    run_marked = np.zeros(len(runs), dtype=bool)  # 某个 run 是否已经被整个标为1
+    y_pred = np.zeros(n, dtype=np.uint8)  # 当前预测（随 t 增长不断更新）
+    best_f1 = -1.0
+    best_preds = None
+    best_t = None
+
+    # thresholds 应该单调增；我们逐步把前 t 的点置 1（增量更新）
+    # 为了兼容 thresholds 任意跳变，先排序唯一化并遍历
+    thresholds_sorted = np.unique(np.sort(thresholds))
+    cur_t = 0
+    for t in thresholds_sorted:
+        if t > n:
+            t = n
+        # 增量把 index cur_t .. t-1 加入预测（这些 index 是按 differ 排序的）
+        while cur_t < t:
+            pos = cur_t  # 因为 df_sort 已按 differ desc 排序，top-N 是前 N 的位置
+            rid = run_id[pos]
+            if rid != -1 and not run_marked[rid]:
+                s, e = runs[rid]
+                y_pred[s:e+1] = 1
+                run_marked[rid] = True
+            else:
+                # 不属于任何 run，或 run 已标过，直接标记该点（若 run 已标过 slice 已为1）
+                y_pred[pos] = 1
+            cur_t += 1
+
+        # 计算指标（使用 sklearn 的 C 实现，速度快）
+        f1 = f1_score(y_true, y_pred, zero_division=0)
+        if f1 > best_f1:
+            best_f1 = f1
+            best_preds = y_pred.copy()
+            best_t = t
+
+    # 最后的 accuracy/precision/recall
+    acc = accuracy_score(y_true, best_preds)
+    prec = precision_score(y_true, best_preds, zero_division=0)
+    rec = recall_score(y_true, best_preds, zero_division=0)
+
+    return best_f1
+    # return {
+    #     'best_f1': best_f1,
+    #     'best_t': int(best_t),
+    #     'best_predictions': best_preds,
+    #     'accuracy': float(acc),
+    #     'precision': float(prec),
+    #     'recall': float(rec)
+    # }
 
 
 #

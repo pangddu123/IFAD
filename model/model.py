@@ -70,10 +70,10 @@ class DDPM(BaseModel):
             max_num = ori.max().item()
             if isinstance(self.netG, nn.DataParallel):
                 self.SR = self.netG.module.super_resolution(
-                    self.data['SR'], continous=continous, min_num=min_num, max_num=max_num)
+                    self.data['SR'], self.data['observed_mask'],self.data['anomaly_scores'],continous=continous, min_num=min_num, max_num=max_num)
             else:
                 self.SR = self.netG.super_resolution(
-                    self.data['SR'], continous=continous, min_num=min_num, max_num=max_num)
+                    self.data['SR'], self.data['observed_mask'],self.data['anomaly_scores'],continous=continous, min_num=min_num, max_num=max_num)
         self.netG.train()
 
     def sample(self, batch_size=1, continous=False):

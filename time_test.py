@@ -51,7 +51,7 @@ def time_test(params, strategy_params,i,anomaly_scores):
     diffusion.set_new_noise_schedule(
         opt['model']['beta_schedule'][opt['phase']], schedule_phase=opt['phase'])
 
-    logger.info('Begin Model Evaluation.')
+    logger_test.info('Begin Model Evaluation.')
     idx = 0
 
     all_datas = pd.DataFrame()
@@ -88,17 +88,21 @@ def time_test(params, strategy_params,i,anomaly_scores):
         sr_datas = sr_datas[:params['row_num']]
     if differ_datas.shape[0] > params['row_num']:
         differ_datas = differ_datas[:params['row_num']]
-    if True:
-        f1 = Metrics.relabeling_strategy(all_datas, strategy_params)
-        temp_f1 = Decimal(f1).quantize(Decimal("0.0000"))
-        print('F1-score: ', float(temp_f1))
+
+
+    f1 = Metrics.relabeling_strategy(all_datas, strategy_params)
+    # f1 = 1
+    temp_f1 = Decimal(f1).quantize(Decimal("0.0000"))
+    logger_test.info(f"{opt['name']}:第{i}次，F1-score: {float(temp_f1)}\n")
+    with open("f1_scores.txt", "a", encoding="utf-8") as f:
+        f.write(f"{opt['name']}:第{i}次，F1-score: {float(temp_f1)}\n")
     anomaly_scores = calculate_anomaly_scores(differ_datas)
     return anomaly_scores
 
 # evaluate model performance
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('-c', '--config', type=str, default='config/smap_time_test.json',
+    parser.add_argument('-c', '--config', type=str, default='config/smd_time_test.json',
                         help='JSON file for configuration')
     parser.add_argument('-p', '--phase', type=str, choices=['train ', 'val', 'test'],
                         help='Run either train(training) or val(generation)', default='test')
@@ -142,6 +146,7 @@ if __name__ == '__main__':
         'model_epoch': model_epoch,
     }
     anomaly_scores = None
-    for i in range(2):
+    for i in range(3):
         anomaly_scores=time_test(params, strategy_params,i,anomaly_scores)
+        np.save("anomaly_scores.npy", anomaly_scores)
     logging.shutdown()

@@ -17,7 +17,7 @@ class LRHRDataset(Dataset):
         self.col_num = self.pre_data.get_col_num()
 
         if datatype == 'time':
-            self.hr_path, self.sr_path, self.labels, self.pre_labels = self.pre_data.get_sr_data()
+            self.hr_path, self.sr_path, self.labels, self.pre_labels,self.anomaly_scores2 = self.pre_data.get_sr_data()
             self.dataset_len = len(self.sr_path)
             if self.data_len <= 0:
                 self.data_len = self.dataset_len
@@ -38,15 +38,10 @@ class LRHRDataset(Dataset):
         data_SR = self.sr_path[index]
         data_label = self.labels[index]
         data_observed_mask = self.pre_labels[index]
-        if self.anomaly_scores is not None:
-            data_anomaly_scores = self.anomaly_scores[index]
+        data_anomaly_scores = self.anomaly_scores2[index]
 
         if self.phase == 'train':
             return {'HR': data_HR, 'SR': data_SR, 'Index': index}
         else:
-            if self.anomaly_scores is None:
-                return {'ORI': data_ORI, 'HR': data_HR, 'SR': data_SR, 'label': data_label,
-                        'observed_mask': data_observed_mask, 'Index': index}
-            else:
-                return {'ORI': data_ORI, 'HR': data_HR, 'SR': data_SR, 'label': data_label,
-                        'observed_mask': data_observed_mask, 'anomaly_scores':data_anomaly_scores,'Index': index}
+            return {'ORI': data_ORI, 'HR': data_HR, 'SR': data_SR, 'label': data_label,
+                    'observed_mask': data_observed_mask, 'anomaly_scores':data_anomaly_scores,'Index': index}

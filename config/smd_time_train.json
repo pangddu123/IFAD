@@ -16,7 +16,7 @@
     "train": {
       "name": "smd_train",
       "mode": "HR",
-      "dataroot": "tf_dataset/smd/smd_train.csv",
+      "dataroot": "tf_dataset/smd/smd_train_0.csv",
       "datatype": "time",
       "l_resolution": 128,
       "r_resolution": 2048,
