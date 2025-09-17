@@ -176,17 +176,11 @@ class GaussianDiffusion(nn.Module):
         device = self.betas.device
         q = 0
         batch_size, channel, seq_len, feature_dim = x_in.shape
-        # 超参数设置
-        alpha = 1.0  # 公式4中的α参数
-        lambda_val = 0.1  # 公式9中的λ参数
-        N0 = 1.0  # 公式9中的N0参数
-        kappa = 0.5  # 公式5中的κ参数
-
-        # 计算观测点的自适应权重（公式4）
-        # anomaly_scores形状应为 (batch_size, seq_len) 或 (batch_size, channel, seq_len)
-        # 我们需要确保权重与x_in的形状匹配
-        if anomaly_scores.dim() == 2:  # (batch_size, seq_len)
-            # 扩展维度以匹配x_in
+        alpha = 1
+        lambda_val = 0.1
+        N0 = 1
+        kappa = 0.5
+        if anomaly_scores.dim() == 2:
             weights = torch.exp(-alpha * anomaly_scores).unsqueeze(1).unsqueeze(-1)
             weights = weights.expand(-1, channel, -1, feature_dim)
         else:  # 假设形状为 (batch_size, channel, seq_len)
@@ -204,38 +198,43 @@ class GaussianDiffusion(nn.Module):
         noise = torch.randn(shape, device=device)
 
         # 结合观测点和噪声（公式5）
-        x_t = kappa * weighted_obs + (1 - kappa) * noise
+        # x_t = kappa * weighted_obs + (1 - kappa) * noise
+        x_t = noise
+
+        sample_inter = (1 | (self.num_timesteps // 10))
+
         # 如果需要连续输出，初始化返回张量
         if continous:
             ret_img = [x_t]
-        sample_inter = (1 | (self.num_timesteps // 10))
+        if self.conditional:
+            for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
+                x_t_minus_1 = self.p_sample(
+                    x_t, i,
+                    condition_x=weighted_obs,
+                    clip_denoised=True
+                )
 
-        # 反向扩散过程
-        for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
-            # 使用加权的观测点作为条件进行采样
-            x_t_minus_1 = self.p_sample(
-                x_t, i,
-                condition_x=weighted_obs,  # 使用加权的观测点作为条件
-                clip_denoised=True
-            )
+                # 动态权重平滑（公式9和10）
+                h = N0 * torch.exp(torch.tensor(-lambda_val * i))  # 公式9
 
-            # 动态权重平滑（公式9和10）
-            h = N0 * torch.exp(torch.tensor(-lambda_val * i))  # 公式9
+                s = obs_mask.unsqueeze(-1).expand_as(x_t_minus_1)
+                x_t_minus_1 = (
+                        s * ((1 - weights * h) * x_t_minus_1 + weights * h * x_in) +
+                        (1 - s) * x_t_minus_1
+                )
 
-            # 应用动态权重平滑（公式10）
-            # 注意：这里s是观测点掩码，1表示观测点，0表示非观测点
-            s = obs_mask.unsqueeze(-1).expand_as(x_t_minus_1)
-            x_t_minus_1 = (
-                    s * ((1 - weights * h) * x_t_minus_1 + weights * h * x_in) +
-                    (1 - s) * x_t_minus_1
-            )
+                x_t = x_t_minus_1
 
-            x_t = x_t_minus_1
-
-            # 如果需要连续输出，保存当前步骤
-            if continous and i % sample_inter == 0:
-                ret_img.append(x_t)
-
+                # 如果需要连续输出，保存当前步骤
+                if continous and i % sample_inter == 0:
+                    ret_img.append(x_t)
+        else:
+            ret_img = x_t
+            for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step',
+                          total=self.num_timesteps):
+                x_t = self.p_sample(x_t, i, clip_denoised=True)
+                if i % sample_inter == 0:
+                    ret_img = torch.cat([ret_img, x_t], dim=0)
         if continous:
             return torch.stack(ret_img)
         else:
@@ -248,8 +247,6 @@ class GaussianDiffusion(nn.Module):
         return self.p_sample_loop((batch_size, channels, time_size, time_size), continous)
 
     @torch.no_grad()
-    # self.netG.module.super_resolution(
-    #                     self.data['SR'], continous=continous, min_num=min_num, max_num=max_num)
     def super_resolution(self, x_in,observed_mask,anomaly_scores,min_num, max_num, continous=False):
         self.min_num = min_num
         self.max_num = max_num
@@ -287,11 +284,29 @@ class GaussianDiffusion(nn.Module):
         if not self.conditional:
             x_recon = self.denoise_fn(x_noisy, continuous_sqrt_alpha_cumprod)
         else:
+            # alpha = 1
+            # anomaly_scores=x_in['anomaly_scores']
+            # observed_mask=x_in['observed_mask']
+            # if anomaly_scores.dim() == 2:  # (batch_size, seq_len)
+            #
+            #     weights = torch.exp(-alpha * anomaly_scores).unsqueeze(1).unsqueeze(-1)
+            #     weights = weights.expand(-1, c, -1, w)
+            # else:  # 假设形状为 (batch_size, channel, seq_len)
+            #     weights = torch.exp(-alpha * anomaly_scores).unsqueeze(-1)
+            #     weights = weights.expand(-1, -1, -1, w)
+            #
+            #
+            # obs_mask = (observed_mask == 0).float().unsqueeze(1).unsqueeze(-1)  # (batch_size, 1, seq_len, 1)
+            #
+            #
+            # weighted_obs = x_in['SR'] * obs_mask * weights
+            # x_cat = torch.cat([weighted_obs, x_noisy], dim=1)
+
             x_cat = torch.cat([x_in['SR'], x_noisy], dim=1)
             x_recon = self.denoise_fn(x_cat, continuous_sqrt_alpha_cumprod)
 
         loss = self.loss_func(noise, x_recon)
         return loss
 
-    def forward(self, x, *args, **kwargs):
+    def forward(self, x,*args, **kwargs):
         return self.p_losses(x, *args, **kwargs)

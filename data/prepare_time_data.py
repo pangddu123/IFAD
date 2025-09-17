@@ -9,7 +9,7 @@ warnings.filterwarnings("ignore")
 
 
 class PrepareTimeData:
-    def __init__(self, data_path, phase, base, size,anomaly_scores=None,observation_ration=0.99):
+    def __init__(self, data_path, phase, base, size,anomaly_scores=None,observation_ration=0.95):
         self.data_path = data_path
         self.phase = phase
         self.base = base
@@ -29,6 +29,10 @@ class PrepareTimeData:
         self.df = self.join_together_labels(self.df)
         self.df = self.fill_data(self.df)
         self.df = self.standardize_data(self.df)
+
+        self.mask_policy = 0  # 对于grating策略: 0或1
+        self.num_mask_windows = 5  # 掩码窗口数量
+        self.num_unmask_windows = 5  # 非掩码窗口数量
 
     def get_hr_data(self):
         df = self.df.copy()
@@ -141,18 +145,28 @@ class PrepareTimeData:
         df['value'] = self.df['value_0']
         df['label'] = self.df['label']
 
-        # 修改这里：根据是否有异常得分选择不同的方法
+        # # 修改这里：根据是否有异常得分选择不同的方法
+        # if self.anomaly_scores is None or len(self.anomaly_scores) == 0:
+        #     # 如果没有异常得分，使用突变点检测
+        #     df_pre_label = self.mutation_point(df)
+        #     self.anomaly_scores = [1e10 if pre_label == 1 else 0 for pre_label in df_pre_label['pre_label']]
+        #     insert_datas = self.insert_normal(df_pre_label)
+        #
+        # else:
+        #     # 如果有异常得分，使用IFAD方法选择观测点
+        #     df_pre_label = self.ifad_select_observation_points(df)
+        #     insert_datas = self.insert_normal_observation(df_pre_label)
+        df_pre_label=df.copy()
+        df_pre_label['pre_label'] = df_pre_label['label']
         if self.anomaly_scores is None or len(self.anomaly_scores) == 0:
-            # 如果没有异常得分，使用突变点检测
-            df_pre_label = self.mutation_point(df)
             self.anomaly_scores = [1e10 if pre_label == 1 else 0 for pre_label in df_pre_label['pre_label']]
-            insert_datas = self.insert_normal(df_pre_label)
+        insert_datas = self.insert_normal(df_pre_label)
 
-        else:
-            # 如果有异常得分，使用IFAD方法选择观测点
-            df_pre_label = self.ifad_select_observation_points(df)
-            insert_datas = self.insert_normal_observation(df_pre_label)
 
+        # df_pre_label = self.grating_mask(df)
+        # if self.anomaly_scores is None or len(self.anomaly_scores) == 0:
+        #     self.anomaly_scores = [1e10 if pre_label == 1 else 0 for pre_label in df_pre_label['pre_label']]
+        # insert_datas = self.insert_normal_observation(df_pre_label)
 
 
         ori_values = []
@@ -197,7 +211,6 @@ class PrepareTimeData:
             pre_label = torch.tensor(np.array(pre_label).astype(np.int64))
             ori_value = torch.tensor(np.array(ori_value).astype(np.float32))
 
-            # ⭐ 关键修改：如果最后一次循环时长度不一致，就补齐
             if i + self.size >= self.df.shape[0]:
                 if len(window_anomaly_scores) != ori_value.shape[0]:
                     diff = ori_value.shape[0] - len(window_anomaly_scores)
@@ -216,6 +229,32 @@ class PrepareTimeData:
         self.anomaly_scores = anomaly_scores_list
         return ori_values, values, labels, pre_labels
 
+    def grating_mask(self, df):
+        """
+        ImDiffusion的grating掩码策略
+        将时间序列分成多个窗口，交替掩码和非掩码窗口
+        """
+        df_pre_label = df.copy()
+        df_pre_label['pre_label'] = 0
+
+        window_size = self.size
+        total_windows = int(np.ceil(self.row_num / window_size))
+
+        pattern_length = self.num_mask_windows + self.num_unmask_windows
+        mask_pattern = [1] * self.num_mask_windows + [0] * self.num_unmask_windows
+
+        if self.mask_policy == 1:
+            mask_pattern = mask_pattern[self.num_mask_windows:] + mask_pattern[:self.num_mask_windows]
+
+        for i in range(total_windows):
+            pattern_index = i % pattern_length
+            if mask_pattern[pattern_index] == 1:
+                start_idx = i * window_size
+                end_idx = min((i + 1) * window_size, self.row_num)
+                df_pre_label.loc[start_idx:end_idx - 1, 'pre_label'] = 1
+
+        return df_pre_label
+
     def ifad_select_observation_points(self, df):
         """
         根据异常分数选择观测点
@@ -223,40 +262,21 @@ class PrepareTimeData:
         df_pre_label = df.copy()
         df_pre_label['pre_label'] = 1  # 默认所有点都需要插值
 
-        # 选择异常分数最低的点作为观测点
         n_observe = int(len(self.anomaly_scores) * self.observation_ration)
         observed_indices = np.argsort(self.anomaly_scores)[:n_observe]
 
-        # 将观测点的pre_label设为0（不需要插值）
         df_pre_label.loc[observed_indices, 'pre_label'] = 0
         # df_pre_label = df_pre_label.drop(columns=['label'])
         return df_pre_label
 
     def insert_normal_observation(self,df_pre_label):
-        """
-        当 pre_label == 1 时，将该行 value 替换为前2个点和后2个点的均值（不包含自身）。
-
-        参数
-        ----
-        df_pre_label : pd.DataFrame
-            必须包含 'value', 'label', 'pre_label' 三列
-
-        返回
-        ----
-        pd.DataFrame
-            替换后的 DataFrame
-        """
         df = df_pre_label.copy()
 
-        # 前2个点 rolling
         prev2 = df['value'].shift(1).rolling(window=2, min_periods=1).mean()
-        # 后2个点 rolling
         next2 = df['value'][::-1].shift(1).rolling(window=2, min_periods=1).mean()[::-1]
 
-        # 计算邻居均值
         neighbor_mean = (prev2 + next2) / 2
 
-        # 仅在 pre_label == 1 时替换
         df.loc[df['pre_label'] == 1, 'value'] = neighbor_mean[df['pre_label'] == 1]
         for i in range(self.row_num, df_pre_label.shape[0]):
             df = df.append(pd.Series(), ignore_index=True)

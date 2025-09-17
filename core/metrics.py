@@ -132,7 +132,7 @@ def relabeling_strategy(df, params):
     precision = calculate_precision(y_true, best_predictions)
     recall = calculate_recall(y_true, best_predictions)
 
-    return best_f1
+    return best_f1,precision,recall
 
 import numpy as np
 from sklearn.metrics import f1_score, accuracy_score, precision_score, recall_score
@@ -205,7 +205,7 @@ def relabeling_strategy_fast(df, params):
     prec = precision_score(y_true, best_preds, zero_division=0)
     rec = recall_score(y_true, best_preds, zero_division=0)
 
-    return best_f1
+    return best_f1,prec,rec
     # return {
     #     'best_f1': best_f1,
     #     'best_t': int(best_t),

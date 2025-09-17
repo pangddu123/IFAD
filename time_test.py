@@ -90,12 +90,15 @@ def time_test(params, strategy_params,i,anomaly_scores):
         differ_datas = differ_datas[:params['row_num']]
 
 
-    f1 = Metrics.relabeling_strategy(all_datas, strategy_params)
+    f1,prec,rec = Metrics.relabeling_strategy(all_datas, strategy_params)
     # f1 = 1
     temp_f1 = Decimal(f1).quantize(Decimal("0.0000"))
+    temp_prec = Decimal(prec).quantize(Decimal("0.0000"))
+    temp_rec = Decimal(rec).quantize(Decimal("0.0000"))
+
     logger_test.info(f"{opt['name']}:第{i}次，F1-score: {float(temp_f1)}\n")
     with open("f1_scores.txt", "a", encoding="utf-8") as f:
-        f.write(f"{opt['name']}:第{i}次，F1-score: {float(temp_f1)}\n")
+        f.write(f"{opt['name']}:第{i}次，F1-score: {float(temp_f1)},Pre:{float(temp_prec)},Rec:{float(temp_rec)}\n")
     anomaly_scores = calculate_anomaly_scores(differ_datas)
     return anomaly_scores
 
@@ -146,7 +149,7 @@ if __name__ == '__main__':
         'model_epoch': model_epoch,
     }
     anomaly_scores = None
-    for i in range(3):
+    for i in range(1):
         anomaly_scores=time_test(params, strategy_params,i,anomaly_scores)
         np.save("anomaly_scores.npy", anomaly_scores)
     logging.shutdown()

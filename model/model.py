@@ -72,6 +72,8 @@ class DDPM(BaseModel):
                 self.SR = self.netG.module.super_resolution(
                     self.data['SR'], self.data['observed_mask'],self.data['anomaly_scores'],continous=continous, min_num=min_num, max_num=max_num)
             else:
+                # self.SR = self.netG.super_resolution(
+                #     self.data['SR'], self.data['observed_mask'],self.data['anomaly_scores'],continous=continous, min_num=min_num, max_num=max_num)
                 self.SR = self.netG.super_resolution(
                     self.data['SR'], self.data['observed_mask'],self.data['anomaly_scores'],continous=continous, min_num=min_num, max_num=max_num)
         self.netG.train()
